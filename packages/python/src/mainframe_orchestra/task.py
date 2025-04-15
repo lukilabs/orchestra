@@ -645,11 +645,42 @@ The original task instruction:
                     messages=temp_history, require_json_output=True, temperature=self.temperature
                 )
 
+                if isinstance(error, ValueError):
+                    logger.warning(f"Failed to get valid JSON after error: {error}. Retrying...")
+
+                    # Call AI with error information
+                    error_prompt = f"""
+The previous response failed to parse as valid JSON. Here's the error and response:
+
+Error: {str(error)}
+Response: {response[:1000]}
+
+Please provide a valid JSON response in the correct format. The response should be a JSON object with a 'tool_calls' array.
+
+Each tool call should be in the following format:
+{tool_call_format_basic}
+
+IMPORTANT: When indicating no more tools are needed, return ONLY the above JSON with no additional text or explanation.
+"""
+                    temp_history.append({"role": "user", "content": error_prompt})
+                    retry_response, retry_error = await self.llm(
+                        messages=temp_history,
+                        require_json_output=True,
+                        temperature=self.temperature
+                    )
+
+                    response = retry_response
+                    error = retry_error
+
+                    if error:
+                        logger.error(f"Error from LLM after retry: {error}")
+
                 if error:
-                    logger.error(f"Error from LLM: {error}")
-                    if callback:
-                        await callback({"type": "error", "content": str(error)})
-                    return error, []
+                  logger.error(f"Error from LLM: {error}")
+                  if callback:
+                      await callback({"type": "error", "content": str(error)})
+
+                  return error, []
 
                 try:
                     # If we got a reasoning tuple, handle both parts
