@@ -645,7 +645,7 @@ The original task instruction:
                     messages=temp_history, require_json_output=True, temperature=self.temperature
                 )
 
-                if isinstance(error, ValueError):
+                if error:
                     logger.warning(f"Failed to get valid JSON after error: {error}. Retrying...")
 
                     # Call AI with error information
