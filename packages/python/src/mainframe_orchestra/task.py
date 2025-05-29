@@ -642,7 +642,8 @@ The original task instruction:
                 temp_history.append({"role": "user", "content": tool_loop_instruction})
 
                 response, error = await self.llm(
-                    messages=temp_history, require_json_output=True, temperature=self.temperature
+                    messages=temp_history, require_json_output=True, temperature=self.temperature,
+                    image_data=self.image_data
                 )
 
                 if isinstance(error, ValueError):
