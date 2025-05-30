@@ -667,7 +667,8 @@ IMPORTANT: When indicating no more tools are needed, return ONLY the above JSON 
                     retry_response, retry_error = await self.llm(
                         messages=temp_history,
                         require_json_output=True,
-                        temperature=self.temperature
+                        temperature=self.temperature,
+                        image_data=self.image_data
                     )
 
                     response = retry_response
