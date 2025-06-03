@@ -157,6 +157,7 @@ class MCPOrchestra:
                 command=command,
                 args=args,
                 env=env,
+                cwd=cwd,
                 encoding=encoding,
                 encoding_error_handler=encoding_error_handler,
             )
