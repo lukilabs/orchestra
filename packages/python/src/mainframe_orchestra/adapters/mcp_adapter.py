@@ -9,7 +9,7 @@ tools into Orchestra-compatible callables that can be used in Orchestra Tasks.
 
 from contextlib import AsyncExitStack
 from types import TracebackType
-from typing import Any, Callable, Dict, List, Optional, Set, Literal
+from typing import Any, Callable, Dict, List, Optional, Set, Literal, Tuple
 import subprocess
 import json
 import time
@@ -109,31 +109,45 @@ class MCPOrchestra:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
             
             try:
-                # --------------- timeout just for the handshake ----------------
+                # Will be filled by the child on success
+                child_result: Dict[str, Any] = {}
+
+                # -------------- parent task owns the timeout -----------------
                 with anyio.fail_after(connection_timeout):
-                    # 1. open the transport
-                    transport_cm = sse_client(
-                        url=sse_url,
-                        headers=sse_headers,
-                        timeout=sse_timeout,
-                        sse_read_timeout=sse_read_timeout,
-                    )
-                    read, write = await transport_cm.__aenter__()
+                    # parent creates task-group; leaving the 'async with' waits for children
+                    async with anyio.create_task_group() as tg:
+                        async def child():
+                            # each child gets its own stack → no interference with parent
+                            local_stack = AsyncExitStack()
+                            try:
+                                session = await self._sse_handshake(
+                                    sse_url=sse_url,
+                                    sse_headers=sse_headers,
+                                    sse_timeout=sse_timeout,
+                                    sse_read_timeout=sse_read_timeout,
+                                    exit_stack=local_stack
+                                )
+                            except BaseException:
+                                await local_stack.aclose()  # cleanup on failure
+                                raise
+                            else:
+                                # success → hand results back to parent
+                                child_result["session"] = session
+                                child_result["stack"] = local_stack
 
-                    # 2. create & open the session
-                    session_cm = ClientSession(read, write)
-                    session = await session_cm.__aenter__()
+                        tg.start_soon(child)
+                    # When we reach here the child finished *or* the timeout already fired
+                # -----------------------------------------------------------------------
 
-                    # 3. do the handshake that can also stall
-                    await session.initialize()
-                # ----------------------------------------------------------------
-                # if we got here the timeout didn't trigger and all inner scopes
-                # are already cleanly entered and off the stack
+                # If we timed out, fail_after has already raised TimeoutError – nothing
+                # below this line runs. Otherwise the handshake succeeded:
+                session: ClientSession = child_result["session"]
+                local_stack: AsyncExitStack = child_result["stack"]
 
-                # NOW hand ownership to the long-lived stack
-                self.exit_stack.push_async_exit(transport_cm.__aexit__)
-                self.exit_stack.push_async_exit(session_cm.__aexit__)
+                # adopt the resources into the long-lived exit stack
+                self.exit_stack.push_async_exit(local_stack.pop_all().aclose)
 
+                # book-keeping
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
@@ -189,26 +203,42 @@ class MCPOrchestra:
             )
 
             try:
-                # --------------- timeout just for the handshake ----------------
+                # Will be filled by the child on success
+                child_result: Dict[str, Any] = {}
+
+                # -------------- parent task owns the timeout -----------------
                 with anyio.fail_after(connection_timeout):
-                    # 1. open the transport
-                    transport_cm = stdio_client(server_params)
-                    read, write = await transport_cm.__aenter__()
+                    # parent creates task-group; leaving the 'async with' waits for children
+                    async with anyio.create_task_group() as tg:
+                        async def child():
+                            # each child gets its own stack → no interference with parent
+                            local_stack = AsyncExitStack()
+                            try:
+                                session = await self._stdio_handshake(
+                                    server_params=server_params,
+                                    exit_stack=local_stack
+                                )
+                            except BaseException:
+                                await local_stack.aclose()  # cleanup on failure
+                                raise
+                            else:
+                                # success → hand results back to parent
+                                child_result["session"] = session
+                                child_result["stack"] = local_stack
 
-                    # 2. create & open the session
-                    session_cm = ClientSession(read, write)
-                    session = await session_cm.__aenter__()
+                        tg.start_soon(child)
+                    # When we reach here the child finished *or* the timeout already fired
+                # -----------------------------------------------------------------------
 
-                    # 3. do the handshake that can also stall
-                    await session.initialize()
-                # ----------------------------------------------------------------
-                # if we got here the timeout didn't trigger and all inner scopes
-                # are already cleanly entered and off the stack
+                # If we timed out, fail_after has already raised TimeoutError – nothing
+                # below this line runs. Otherwise the handshake succeeded:
+                session: ClientSession = child_result["session"]
+                local_stack: AsyncExitStack = child_result["stack"]
 
-                # NOW hand ownership to the long-lived stack
-                self.exit_stack.push_async_exit(transport_cm.__aexit__)
-                self.exit_stack.push_async_exit(session_cm.__aexit__)
+                # adopt the resources into the long-lived exit stack
+                self.exit_stack.push_async_exit(local_stack.pop_all().aclose)
 
+                # book-keeping
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
@@ -225,6 +255,62 @@ class MCPOrchestra:
             except Exception as exc:
                 logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
                 raise
+
+    async def _stdio_handshake(
+        self,
+        server_params: StdioServerParameters,
+        *,
+        exit_stack: AsyncExitStack
+    ) -> ClientSession:
+        """
+        Runs in the CHILD TASK.
+        Everything it opens is recorded in the *local* exit_stack that the
+        parent task will adopt on success.
+        """
+        # 1️⃣ open stdio transport
+        stdio_transport = await exit_stack.enter_async_context(stdio_client(server_params))
+        read, write = stdio_transport
+
+        # 2️⃣ create + open ClientSession
+        session = await exit_stack.enter_async_context(ClientSession(read, write))
+
+        # 3️⃣ handshake
+        await session.initialize()
+
+        return session
+        
+    async def _sse_handshake(
+        self,
+        sse_url: str,
+        sse_headers: Optional[Dict[str, Any]],
+        sse_timeout: float,
+        sse_read_timeout: float,
+        *,
+        exit_stack: AsyncExitStack
+    ) -> ClientSession:
+        """
+        Runs in the CHILD TASK.
+        Everything it opens is recorded in the *local* exit_stack that the
+        parent task will adopt on success.
+        """
+        # 1️⃣ open SSE transport
+        transport = await exit_stack.enter_async_context(
+            sse_client(
+                url=sse_url,
+                headers=sse_headers,
+                timeout=sse_timeout,
+                sse_read_timeout=sse_read_timeout,
+            )
+        )
+        read, write = transport
+
+        # 2️⃣ create + open ClientSession
+        session = await exit_stack.enter_async_context(ClientSession(read, write))
+
+        # 3️⃣ handshake
+        await session.initialize()
+
+        return session
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
         """
