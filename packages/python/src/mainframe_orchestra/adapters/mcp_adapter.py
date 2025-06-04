@@ -109,7 +109,7 @@ class MCPOrchestra:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
             
             try:
-                async with anyio.move_on_after(connection_timeout) as scope:
+                with anyio.move_on_after(connection_timeout) as scope:
                     # SSE connection
                     transport = await self.exit_stack.enter_async_context(
                         sse_client(
@@ -183,7 +183,7 @@ class MCPOrchestra:
             )
 
             try:
-                async with anyio.move_on_after(connection_timeout) as scope:
+                with anyio.move_on_after(connection_timeout) as scope:
                     # Establish connection
                     stdio_transport = await self.exit_stack.enter_async_context(
                         stdio_client(server_params)
