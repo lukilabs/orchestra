@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Literal
 import subprocess
 import json
 import time
+import anyio
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import (
     Tool as MCPTool,
@@ -62,6 +63,7 @@ class MCPOrchestra:
         sse_timeout: float = 5.0,
         sse_read_timeout: float = 300.0,
         credentials_key: Optional[str] = None,
+        connection_timeout: float = 10.0,
     ) -> None:
         """
         Connect to an MCP server and load its tools.
@@ -81,6 +83,7 @@ class MCPOrchestra:
             sse_timeout: Timeout for SSE connection establishment (seconds)
             sse_read_timeout: Timeout for SSE event reading (seconds)
             credentials_key: Optional key to use for looking up credentials in self.credentials
+            connection_timeout: Timeout for the entire connection process (seconds)
         """
         logger.debug(f"Connecting to MCP server: {server_name}")
 
@@ -102,28 +105,43 @@ class MCPOrchestra:
         # Check if we're using SSE or stdio
         if sse_url:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
-            # SSE connection
-            transport = await self.exit_stack.enter_async_context(
-                sse_client(
-                    url=sse_url,
-                    headers=sse_headers,
-                    timeout=sse_timeout,
-                    sse_read_timeout=sse_read_timeout,
-                )
-            )
-            read, write = transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            
+            try:
+                async with anyio.move_on_after(connection_timeout) as scope:
+                    # SSE connection
+                    transport = await self.exit_stack.enter_async_context(
+                        sse_client(
+                            url=sse_url,
+                            headers=sse_headers,
+                            timeout=sse_timeout,
+                            sse_read_timeout=sse_read_timeout,
+                        )
+                    )
+                    read, write = transport
+                    session = await self.exit_stack.enter_async_context(ClientSession(read, write))
 
-            # Initialize session
-            await session.initialize()
-            self.sessions[server_name] = session
-            logger.debug(f"Successfully initialized session for server: {server_name}")
+                    # Initialize session
+                    await session.initialize()
+                
+                if scope.cancel_called:
+                    raise TimeoutError(f"Connecting to server '{server_name}' timed out after {connection_timeout} seconds")
+                
+                self.sessions[server_name] = session
+                logger.debug(f"Successfully initialized session for server: {server_name}")
 
-            # Load tools from this server
-            server_tools = await self._load_tools(session, server_name)
-            self.server_tools[server_name] = server_tools
-            self.tools.update(server_tools)
-            logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                # Load tools from this server
+                server_tools = await self._load_tools(session, server_name)
+                self.server_tools[server_name] = server_tools
+                self.tools.update(server_tools)
+                logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                
+            except TimeoutError as exc:
+                logger.error(f"Timeout during connection setup for {server_name}: {exc}")
+                raise
+                
+            except Exception as exc:
+                logger.error(f"Exception during connection setup for {server_name}: {exc}")
+                raise
 
         else:
             # Stdio connection
@@ -162,23 +180,37 @@ class MCPOrchestra:
                 encoding_error_handler=encoding_error_handler,
             )
 
-            # Establish connection
-            stdio_transport = await self.exit_stack.enter_async_context(
-                stdio_client(server_params)
-            )
-            read, write = stdio_transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            try:
+                async with anyio.move_on_after(connection_timeout) as scope:
+                    # Establish connection
+                    stdio_transport = await self.exit_stack.enter_async_context(
+                        stdio_client(server_params)
+                    )
+                    read, write = stdio_transport
+                    session = await self.exit_stack.enter_async_context(ClientSession(read, write))
 
-            # Initialize session
-            await session.initialize()
-            self.sessions[server_name] = session
-            logger.debug(f"Successfully initialized session for server: {server_name}")
+                    # Initialize session
+                    await session.initialize()
 
-            # Load tools from this server
-            server_tools = await self._load_tools(session, server_name)
-            self.server_tools[server_name] = server_tools
-            self.tools.update(server_tools)
-            logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                if scope.cancel_called:
+                    raise TimeoutError(f"Connecting to server '{server_name}' timed out after {connection_timeout} seconds")
+                
+                self.sessions[server_name] = session
+                logger.debug(f"Successfully initialized session for server: {server_name}")
+
+                # Load tools from this server
+                server_tools = await self._load_tools(session, server_name)
+                self.server_tools[server_name] = server_tools
+                self.tools.update(server_tools)
+                logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                
+            except TimeoutError as exc:
+                logger.error(f"Timeout during connection setup for {server_name}: {exc}")
+                raise
+                
+            except Exception as exc:
+                logger.error(f"Exception during connection setup for {server_name}: {exc}")
+                raise
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
         """
