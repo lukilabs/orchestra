@@ -15,7 +15,6 @@ import json
 import time
 import asyncio # Add asyncio for timeout handling
 import anyio # For anyio.fail_after
-from anyio.exceptions import TimeoutError as AnyioTimeoutError # For anyio timeout
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import (
     Tool as MCPTool,
@@ -137,7 +136,7 @@ class MCPOrchestra:
                 self.tools.update(server_tools)
                 logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
 
-            except AnyioTimeoutError:
+            except TimeoutError:
                 logger.error(f"Timeout initializing SSE session for MCP server {server_name} after {initialize_timeout}s (using anyio.fail_after)")
                 raise ConnectionError(f"Timeout initializing SSE session for MCP server {server_name}") from None
             except Exception as e:
@@ -205,7 +204,7 @@ class MCPOrchestra:
                 self.tools.update(server_tools)
                 logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
 
-            except AnyioTimeoutError:
+            except TimeoutError:
                 logger.error(f"Timeout initializing stdio session for MCP server {server_name} after {initialize_timeout}s (using anyio.fail_after)")
                 raise ConnectionError(f"Timeout initializing stdio session for MCP server {server_name}") from None
             except Exception as e:
