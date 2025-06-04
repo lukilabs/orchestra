@@ -63,7 +63,7 @@ class MCPOrchestra:
         sse_timeout: float = 5.0,
         sse_read_timeout: float = 300.0,
         credentials_key: Optional[str] = None,
-        initialize_timeout: Optional[float] = 10.0,  # Timeout for session.initialize()
+        initialize_timeout: Optional[float] = None,  # Timeout for session.initialize()
     ) -> None:
         """
         Connect to an MCP server and load its tools.
@@ -86,6 +86,9 @@ class MCPOrchestra:
             initialize_timeout: Optional timeout in seconds for the session.initialize() call.
         """
         logger.debug(f"Connecting to MCP server: {server_name}")
+
+        if initialize_timeout is None or initialize_timeout < 0:
+            initialize_timeout = 5.0 if sse_url else 1.0
 
         # Apply credentials if provided
         if credentials_key and credentials_key in self.credentials:
@@ -119,13 +122,9 @@ class MCPOrchestra:
 
             # Initialize session
             try:
-                if initialize_timeout is not None:
-                    logger.debug(f"Initializing SSE session for {server_name} with timeout: {initialize_timeout}s")
-                    await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
-                else:
-                    logger.debug(f"Initializing SSE session for {server_name} without timeout")
-                    await session.initialize()
-
+                logger.debug(f"Initializing SSE session for {server_name} with timeout: {initialize_timeout}s")
+                await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
+                
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
@@ -137,12 +136,6 @@ class MCPOrchestra:
 
             except asyncio.TimeoutError:
                 logger.error(f"Timeout initializing SSE session for MCP server {server_name} after {initialize_timeout}s")
-                if session: # session should exist if __aenter__ succeeded
-                    try:
-                        logger.info(f"Attempting to gracefully close SSE session {server_name} after initialize timeout.")
-                        await session.close() # Explicitly close the session
-                    except Exception as close_exc:
-                        logger.error(f"Error closing SSE session {server_name} after initialize timeout: {close_exc}", exc_info=True)
                 raise ConnectionError(f"Timeout initializing SSE session for MCP server {server_name}") from None
             except Exception as e:
                 logger.error(f"Error initializing SSE session or loading tools for {server_name}: {e}", exc_info=True)
@@ -197,13 +190,9 @@ class MCPOrchestra:
 
             # Initialize session
             try:
-                if initialize_timeout is not None:
-                    logger.debug(f"Initializing stdio session for {server_name} with timeout: {initialize_timeout}s")
-                    await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
-                else:
-                    logger.debug(f"Initializing stdio session for {server_name} without timeout")
-                    await session.initialize()
-
+                logger.debug(f"Initializing stdio session for {server_name} with timeout: {initialize_timeout}s")
+                await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
+                
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
@@ -215,12 +204,6 @@ class MCPOrchestra:
 
             except asyncio.TimeoutError:
                 logger.error(f"Timeout initializing stdio session for MCP server {server_name} after {initialize_timeout}s")
-                if session: # session should exist if __aenter__ succeeded
-                    try:
-                        logger.info(f"Attempting to gracefully close stdio session {server_name} after initialize timeout.")
-                        await session.close() # Explicitly close the session
-                    except Exception as close_exc:
-                        logger.error(f"Error closing stdio session {server_name} after initialize timeout: {close_exc}", exc_info=True)
                 raise ConnectionError(f"Timeout initializing stdio session for MCP server {server_name}") from None
             except Exception as e:
                 logger.error(f"Error initializing stdio session or loading tools for {server_name}: {e}", exc_info=True)
