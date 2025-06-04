@@ -56,6 +56,7 @@ class MCPOrchestra:
         encoding_error_handler: Literal["strict", "ignore", "replace"] = "strict",
         start_server: bool = False,
         server_startup_delay: float = 2.0,
+        cwd: Optional[str] = None,
         sse_url: Optional[str] = None,
         sse_headers: Optional[Dict[str, Any]] = None,
         sse_timeout: float = 5.0,
@@ -74,6 +75,7 @@ class MCPOrchestra:
             encoding_error_handler: How to handle encoding errors
             start_server: Whether to start the server process before connecting
             server_startup_delay: Time to wait after starting server before connecting (seconds)
+            cwd: Working directory for the server process
             sse_url: URL for SSE-based MCP server (if using SSE instead of stdio)
             sse_headers: Optional HTTP headers for SSE connection
             sse_timeout: Timeout for SSE connection establishment (seconds)
@@ -137,7 +139,8 @@ class MCPOrchestra:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    env=env
+                    env=env,
+                    cwd=cwd
                 )
                 self.server_processes[server_name] = server_process
                 logger.debug(f"Server process started with PID: {server_process.pid}")
@@ -154,6 +157,7 @@ class MCPOrchestra:
                 command=command,
                 args=args,
                 env=env,
+                cwd=cwd,
                 encoding=encoding,
                 encoding_error_handler=encoding_error_handler,
             )
