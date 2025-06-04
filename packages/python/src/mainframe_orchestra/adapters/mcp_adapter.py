@@ -109,25 +109,31 @@ class MCPOrchestra:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
             
             try:
-                with anyio.move_on_after(connection_timeout) as scope:
-                    # SSE connection
-                    transport = await self.exit_stack.enter_async_context(
-                        sse_client(
-                            url=sse_url,
-                            headers=sse_headers,
-                            timeout=sse_timeout,
-                            sse_read_timeout=sse_read_timeout,
-                        )
+                # --------------- timeout just for the handshake ----------------
+                with anyio.fail_after(connection_timeout):
+                    # 1. open the transport
+                    transport_cm = sse_client(
+                        url=sse_url,
+                        headers=sse_headers,
+                        timeout=sse_timeout,
+                        sse_read_timeout=sse_read_timeout,
                     )
-                    read, write = transport
-                    session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+                    read, write = await transport_cm.__aenter__()
 
-                    # Initialize session
+                    # 2. create & open the session
+                    session_cm = ClientSession(read, write)
+                    session = await session_cm.__aenter__()
+
+                    # 3. do the handshake that can also stall
                     await session.initialize()
-                
-                if scope.cancel_called:
-                    raise TimeoutError(f"Connecting to server '{server_name}' timed out after {connection_timeout} seconds")
-                
+                # ----------------------------------------------------------------
+                # if we got here the timeout didn't trigger and all inner scopes
+                # are already cleanly entered and off the stack
+
+                # NOW hand ownership to the long-lived stack
+                self.exit_stack.push_async_exit(transport_cm.__aexit__)
+                self.exit_stack.push_async_exit(session_cm.__aexit__)
+
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
@@ -183,20 +189,26 @@ class MCPOrchestra:
             )
 
             try:
-                with anyio.move_on_after(connection_timeout) as scope:
-                    # Establish connection
-                    stdio_transport = await self.exit_stack.enter_async_context(
-                        stdio_client(server_params)
-                    )
-                    read, write = stdio_transport
-                    session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+                # --------------- timeout just for the handshake ----------------
+                with anyio.fail_after(connection_timeout):
+                    # 1. open the transport
+                    transport_cm = stdio_client(server_params)
+                    read, write = await transport_cm.__aenter__()
 
-                    # Initialize session
+                    # 2. create & open the session
+                    session_cm = ClientSession(read, write)
+                    session = await session_cm.__aenter__()
+
+                    # 3. do the handshake that can also stall
                     await session.initialize()
+                # ----------------------------------------------------------------
+                # if we got here the timeout didn't trigger and all inner scopes
+                # are already cleanly entered and off the stack
 
-                if scope.cancel_called:
-                    raise TimeoutError(f"Connecting to server '{server_name}' timed out after {connection_timeout} seconds")
-                
+                # NOW hand ownership to the long-lived stack
+                self.exit_stack.push_async_exit(transport_cm.__aexit__)
+                self.exit_stack.push_async_exit(session_cm.__aexit__)
+
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
 
