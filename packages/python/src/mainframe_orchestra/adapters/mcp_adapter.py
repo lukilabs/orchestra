@@ -13,6 +13,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Literal
 import subprocess
 import json
 import time
+import asyncio # Add asyncio for timeout handling
+import anyio # For anyio.fail_after
+from anyio.exceptions import TimeoutError as AnyioTimeoutError # For anyio timeout
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import (
     Tool as MCPTool,
@@ -21,7 +24,6 @@ from mcp.types import (
 )
 from mcp.client.sse import sse_client
 from ..utils.logging_config import logger
-import asyncio # Add asyncio for timeout handling
 
 class MCPOrchestra:
     """
@@ -113,7 +115,7 @@ class MCPOrchestra:
                 sse_client(
                     url=sse_url,
                     headers=sse_headers,
-                    timeout=sse_timeout,
+                    timeout=sse_timeout, # This is for sse_client connection, not session.initialize
                     sse_read_timeout=sse_read_timeout,
                 )
             )
@@ -122,8 +124,9 @@ class MCPOrchestra:
 
             # Initialize session
             try:
-                logger.debug(f"Initializing SSE session for {server_name} with timeout: {initialize_timeout}s")
-                await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
+                logger.debug(f"Initializing SSE session for {server_name} with anyio timeout: {initialize_timeout}s")
+                async with anyio.fail_after(initialize_timeout):
+                    await session.initialize()
                 
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
@@ -134,12 +137,11 @@ class MCPOrchestra:
                 self.tools.update(server_tools)
                 logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
 
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout initializing SSE session for MCP server {server_name} after {initialize_timeout}s")
+            except AnyioTimeoutError:
+                logger.error(f"Timeout initializing SSE session for MCP server {server_name} after {initialize_timeout}s (using anyio.fail_after)")
                 raise ConnectionError(f"Timeout initializing SSE session for MCP server {server_name}") from None
             except Exception as e:
                 logger.error(f"Error initializing SSE session or loading tools for {server_name}: {e}", exc_info=True)
-                # session is in exit_stack if __aenter__ succeeded, will be cleaned up.
                 raise
 
         else:
@@ -190,8 +192,9 @@ class MCPOrchestra:
 
             # Initialize session
             try:
-                logger.debug(f"Initializing stdio session for {server_name} with timeout: {initialize_timeout}s")
-                await asyncio.wait_for(session.initialize(), timeout=initialize_timeout)
+                logger.debug(f"Initializing stdio session for {server_name} with anyio timeout: {initialize_timeout}s")
+                async with anyio.fail_after(initialize_timeout):
+                    await session.initialize()
                 
                 self.sessions[server_name] = session
                 logger.debug(f"Successfully initialized session for server: {server_name}")
@@ -202,12 +205,11 @@ class MCPOrchestra:
                 self.tools.update(server_tools)
                 logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
 
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout initializing stdio session for MCP server {server_name} after {initialize_timeout}s")
+            except AnyioTimeoutError:
+                logger.error(f"Timeout initializing stdio session for MCP server {server_name} after {initialize_timeout}s (using anyio.fail_after)")
                 raise ConnectionError(f"Timeout initializing stdio session for MCP server {server_name}") from None
             except Exception as e:
                 logger.error(f"Error initializing stdio session or loading tools for {server_name}: {e}", exc_info=True)
-                # session is in exit_stack if __aenter__ succeeded, will be cleaned up.
                 raise
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
