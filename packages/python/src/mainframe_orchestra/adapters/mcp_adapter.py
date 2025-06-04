@@ -7,6 +7,7 @@ This module provides a client for connecting to MCP servers and converting their
 tools into Orchestra-compatible callables that can be used in Orchestra Tasks.
 """
 
+from __future__ import annotations
 from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any, Callable, Dict, List, Optional, Set, Literal, Tuple
@@ -109,43 +110,21 @@ class MCPOrchestra:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
             
             try:
-                # Will be filled by the child on success
-                child_result: Dict[str, Any] = {}
-
-                # -------------- parent task owns the timeout -----------------
+                # --------- the only cancel scope in this task ----------
                 with anyio.fail_after(connection_timeout):
-                    # parent creates task-group; leaving the 'async with' waits for children
-                    async with anyio.create_task_group() as tg:
-                        async def child():
-                            # each child gets its own stack → no interference with parent
-                            local_stack = AsyncExitStack()
-                            try:
-                                session = await self._sse_handshake(
-                                    sse_url=sse_url,
-                                    sse_headers=sse_headers,
-                                    sse_timeout=sse_timeout,
-                                    sse_read_timeout=sse_read_timeout,
-                                    exit_stack=local_stack
-                                )
-                            except BaseException:
-                                await local_stack.aclose()  # cleanup on failure
-                                raise
-                            else:
-                                # success → hand results back to parent
-                                child_result["session"] = session
-                                child_result["stack"] = local_stack
+                    session, cleanup_stack = await self._open_sse(
+                        sse_url=sse_url,
+                        sse_headers=sse_headers,
+                        sse_timeout=sse_timeout,
+                        sse_read_timeout=sse_read_timeout
+                    )
+                # --------------------------------------------------------
 
-                        tg.start_soon(child)
-                    # When we reach here the child finished *or* the timeout already fired
-                # -----------------------------------------------------------------------
+                # If we timed out, fail_after has already raised TimeoutError and the code
+                # below never runs. Otherwise the handshake succeeded:
 
-                # If we timed out, fail_after has already raised TimeoutError – nothing
-                # below this line runs. Otherwise the handshake succeeded:
-                session: ClientSession = child_result["session"]
-                local_stack: AsyncExitStack = child_result["stack"]
-
-                # adopt the resources into the long-lived exit stack
-                self.exit_stack.push_async_exit(local_stack.pop_all().aclose)
+                # adopt the cleanup callbacks into the adapter-wide stack
+                self.exit_stack.push_async_exit(cleanup_stack.aclose)
 
                 # book-keeping
                 self.sessions[server_name] = session
@@ -203,40 +182,16 @@ class MCPOrchestra:
             )
 
             try:
-                # Will be filled by the child on success
-                child_result: Dict[str, Any] = {}
-
-                # -------------- parent task owns the timeout -----------------
+                # --------- the only cancel scope in this task ----------
                 with anyio.fail_after(connection_timeout):
-                    # parent creates task-group; leaving the 'async with' waits for children
-                    async with anyio.create_task_group() as tg:
-                        async def child():
-                            # each child gets its own stack → no interference with parent
-                            local_stack = AsyncExitStack()
-                            try:
-                                session = await self._stdio_handshake(
-                                    server_params=server_params,
-                                    exit_stack=local_stack
-                                )
-                            except BaseException:
-                                await local_stack.aclose()  # cleanup on failure
-                                raise
-                            else:
-                                # success → hand results back to parent
-                                child_result["session"] = session
-                                child_result["stack"] = local_stack
+                    session, cleanup_stack = await self._open_stdio(server_params)
+                # --------------------------------------------------------
 
-                        tg.start_soon(child)
-                    # When we reach here the child finished *or* the timeout already fired
-                # -----------------------------------------------------------------------
+                # If we timed out, fail_after has already raised TimeoutError and the code
+                # below never runs. Otherwise the handshake succeeded:
 
-                # If we timed out, fail_after has already raised TimeoutError – nothing
-                # below this line runs. Otherwise the handshake succeeded:
-                session: ClientSession = child_result["session"]
-                local_stack: AsyncExitStack = child_result["stack"]
-
-                # adopt the resources into the long-lived exit stack
-                self.exit_stack.push_async_exit(local_stack.pop_all().aclose)
+                # adopt the cleanup callbacks into the adapter-wide stack
+                self.exit_stack.push_async_exit(cleanup_stack.aclose)
 
                 # book-keeping
                 self.sessions[server_name] = session
@@ -256,61 +211,53 @@ class MCPOrchestra:
                 logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
                 raise
 
-    async def _stdio_handshake(
+    async def _open_stdio(
         self,
-        server_params: StdioServerParameters,
-        *,
-        exit_stack: AsyncExitStack
-    ) -> ClientSession:
+        server_params: StdioServerParameters
+    ) -> Tuple[ClientSession, AsyncExitStack]:
         """
-        Runs in the CHILD TASK.
-        Everything it opens is recorded in the *local* exit_stack that the
-        parent task will adopt on success.
+        Opens stdio_client, creates ClientSession, runs .initialize().
+        All resources are kept in a local AsyncExitStack so they are
+        automatically cleaned up if this coroutine is cancelled.
         """
-        # 1️⃣ open stdio transport
-        stdio_transport = await exit_stack.enter_async_context(stdio_client(server_params))
-        read, write = stdio_transport
+        async with AsyncExitStack() as stack:            # local scope
+            transport = await stack.enter_async_context(stdio_client(server_params))
+            read, write = transport
 
-        # 2️⃣ create + open ClientSession
-        session = await exit_stack.enter_async_context(ClientSession(read, write))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()                   # <-- can hang
 
-        # 3️⃣ handshake
-        await session.initialize()
+            #  success ▸ transfer ownership of the resources
+            return session, stack.pop_all()              # nothing left to close here
 
-        return session
-        
-    async def _sse_handshake(
+    async def _open_sse(
         self,
         sse_url: str,
         sse_headers: Optional[Dict[str, Any]],
         sse_timeout: float,
-        sse_read_timeout: float,
-        *,
-        exit_stack: AsyncExitStack
-    ) -> ClientSession:
+        sse_read_timeout: float
+    ) -> Tuple[ClientSession, AsyncExitStack]:
         """
-        Runs in the CHILD TASK.
-        Everything it opens is recorded in the *local* exit_stack that the
-        parent task will adopt on success.
+        Opens sse_client, creates ClientSession, runs .initialize().
+        All resources are kept in a local AsyncExitStack so they are
+        automatically cleaned up if this coroutine is cancelled.
         """
-        # 1️⃣ open SSE transport
-        transport = await exit_stack.enter_async_context(
-            sse_client(
-                url=sse_url,
-                headers=sse_headers,
-                timeout=sse_timeout,
-                sse_read_timeout=sse_read_timeout,
+        async with AsyncExitStack() as stack:            # local scope
+            transport = await stack.enter_async_context(
+                sse_client(
+                    url=sse_url,
+                    headers=sse_headers,
+                    timeout=sse_timeout,
+                    sse_read_timeout=sse_read_timeout,
+                )
             )
-        )
-        read, write = transport
+            read, write = transport
 
-        # 2️⃣ create + open ClientSession
-        session = await exit_stack.enter_async_context(ClientSession(read, write))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()                   # <-- can hang
 
-        # 3️⃣ handshake
-        await session.initialize()
-
-        return session
+            #  success ▸ transfer ownership of the resources
+            return session, stack.pop_all()              # nothing left to close here
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
         """
