@@ -142,7 +142,7 @@ class MCPOrchestra:
                 raise
                 
             except Exception as exc:
-                logger.error(f"Exception during connection setup for {server_name}: {exc}")
+                logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
                 raise
 
         else:
@@ -211,7 +211,7 @@ class MCPOrchestra:
                 raise
                 
             except Exception as exc:
-                logger.error(f"Exception during connection setup for {server_name}: {exc}")
+                logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
                 raise
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
