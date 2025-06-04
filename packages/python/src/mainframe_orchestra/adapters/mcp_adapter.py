@@ -63,7 +63,7 @@ class MCPOrchestra:
         sse_timeout: float = 5.0,
         sse_read_timeout: float = 300.0,
         credentials_key: Optional[str] = None,
-        connection_timeout: float = 10.0,
+        connection_timeout: float = -1,
     ) -> None:
         """
         Connect to an MCP server and load its tools.
@@ -86,6 +86,8 @@ class MCPOrchestra:
             connection_timeout: Timeout for the entire connection process (seconds)
         """
         logger.debug(f"Connecting to MCP server: {server_name}")
+        if connection_timeout == -1:
+            connection_timeout = 5 if sse_url else 1
 
         # Apply credentials if provided
         if credentials_key and credentials_key in self.credentials:
