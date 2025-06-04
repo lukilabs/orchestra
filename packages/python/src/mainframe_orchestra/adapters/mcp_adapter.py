@@ -86,7 +86,7 @@ class MCPOrchestra:
             connection_timeout: Timeout for the entire connection process (seconds)
         """
         logger.debug(f"Connecting to MCP server: {server_name}")
-        if connection_timeout == -1:
+        if connection_timeout < 0:
             connection_timeout = 5 if sse_url else 1
 
         # Apply credentials if provided
