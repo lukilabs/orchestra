@@ -7,12 +7,14 @@ This module provides a client for connecting to MCP servers and converting their
 tools into Orchestra-compatible callables that can be used in Orchestra Tasks.
 """
 
+from __future__ import annotations
 from contextlib import AsyncExitStack
 from types import TracebackType
-from typing import Any, Callable, Dict, List, Optional, Set, Literal
+from typing import Any, Callable, Dict, List, Optional, Set, Literal, Tuple
 import subprocess
 import json
 import time
+import anyio
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.types import (
     Tool as MCPTool,
@@ -62,6 +64,7 @@ class MCPOrchestra:
         sse_timeout: float = 5.0,
         sse_read_timeout: float = 300.0,
         credentials_key: Optional[str] = None,
+        connection_timeout: float = -1,
     ) -> None:
         """
         Connect to an MCP server and load its tools.
@@ -81,8 +84,11 @@ class MCPOrchestra:
             sse_timeout: Timeout for SSE connection establishment (seconds)
             sse_read_timeout: Timeout for SSE event reading (seconds)
             credentials_key: Optional key to use for looking up credentials in self.credentials
+            connection_timeout: Timeout for the entire connection process (seconds)
         """
         logger.debug(f"Connecting to MCP server: {server_name}")
+        if connection_timeout < 0:
+            connection_timeout = 5 if sse_url else 1
 
         # Apply credentials if provided
         if credentials_key and credentials_key in self.credentials:
@@ -102,28 +108,41 @@ class MCPOrchestra:
         # Check if we're using SSE or stdio
         if sse_url:
             logger.debug(f"Using SSE connection for server {server_name}: {sse_url}")
-            # SSE connection
-            transport = await self.exit_stack.enter_async_context(
-                sse_client(
-                    url=sse_url,
-                    headers=sse_headers,
-                    timeout=sse_timeout,
-                    sse_read_timeout=sse_read_timeout,
-                )
-            )
-            read, write = transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            
+            try:
+                # --------- the only cancel scope in this task ----------
+                with anyio.fail_after(connection_timeout):
+                    session, cleanup_stack = await self._open_sse(
+                        sse_url=sse_url,
+                        sse_headers=sse_headers,
+                        sse_timeout=sse_timeout,
+                        sse_read_timeout=sse_read_timeout
+                    )
+                # --------------------------------------------------------
 
-            # Initialize session
-            await session.initialize()
-            self.sessions[server_name] = session
-            logger.debug(f"Successfully initialized session for server: {server_name}")
+                # If we timed out, fail_after has already raised TimeoutError and the code
+                # below never runs. Otherwise the handshake succeeded:
 
-            # Load tools from this server
-            server_tools = await self._load_tools(session, server_name)
-            self.server_tools[server_name] = server_tools
-            self.tools.update(server_tools)
-            logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                # adopt the cleanup callbacks into the adapter-wide stack
+                self.exit_stack.push_async_exit(cleanup_stack.aclose)
+
+                # book-keeping
+                self.sessions[server_name] = session
+                logger.debug(f"Successfully initialized session for server: {server_name}")
+
+                # Load tools from this server
+                server_tools = await self._load_tools(session, server_name)
+                self.server_tools[server_name] = server_tools
+                self.tools.update(server_tools)
+                logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                
+            except TimeoutError as exc:
+                logger.error(f"Timeout during connection setup for {server_name}: {exc}")
+                raise
+                
+            except Exception as exc:
+                logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
+                raise
 
         else:
             # Stdio connection
@@ -162,23 +181,83 @@ class MCPOrchestra:
                 encoding_error_handler=encoding_error_handler,
             )
 
-            # Establish connection
-            stdio_transport = await self.exit_stack.enter_async_context(
-                stdio_client(server_params)
+            try:
+                # --------- the only cancel scope in this task ----------
+                with anyio.fail_after(connection_timeout):
+                    session, cleanup_stack = await self._open_stdio(server_params)
+                # --------------------------------------------------------
+
+                # If we timed out, fail_after has already raised TimeoutError and the code
+                # below never runs. Otherwise the handshake succeeded:
+
+                # adopt the cleanup callbacks into the adapter-wide stack
+                self.exit_stack.push_async_exit(cleanup_stack.aclose)
+
+                # book-keeping
+                self.sessions[server_name] = session
+                logger.debug(f"Successfully initialized session for server: {server_name}")
+
+                # Load tools from this server
+                server_tools = await self._load_tools(session, server_name)
+                self.server_tools[server_name] = server_tools
+                self.tools.update(server_tools)
+                logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+                
+            except TimeoutError as exc:
+                logger.error(f"Timeout during connection setup for {server_name}: {exc}")
+                raise
+                
+            except Exception as exc:
+                logger.error(f"Exception during connection setup for {server_name}: {exc}", exc_info=True)
+                raise
+
+    async def _open_stdio(
+        self,
+        server_params: StdioServerParameters
+    ) -> Tuple[ClientSession, AsyncExitStack]:
+        """
+        Opens stdio_client, creates ClientSession, runs .initialize().
+        All resources are kept in a local AsyncExitStack so they are
+        automatically cleaned up if this coroutine is cancelled.
+        """
+        async with AsyncExitStack() as stack:            # local scope
+            transport = await stack.enter_async_context(stdio_client(server_params))
+            read, write = transport
+
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()                   # <-- can hang
+
+            #  success ▸ transfer ownership of the resources
+            return session, stack.pop_all()              # nothing left to close here
+
+    async def _open_sse(
+        self,
+        sse_url: str,
+        sse_headers: Optional[Dict[str, Any]],
+        sse_timeout: float,
+        sse_read_timeout: float
+    ) -> Tuple[ClientSession, AsyncExitStack]:
+        """
+        Opens sse_client, creates ClientSession, runs .initialize().
+        All resources are kept in a local AsyncExitStack so they are
+        automatically cleaned up if this coroutine is cancelled.
+        """
+        async with AsyncExitStack() as stack:            # local scope
+            transport = await stack.enter_async_context(
+                sse_client(
+                    url=sse_url,
+                    headers=sse_headers,
+                    timeout=sse_timeout,
+                    sse_read_timeout=sse_read_timeout,
+                )
             )
-            read, write = stdio_transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            read, write = transport
 
-            # Initialize session
-            await session.initialize()
-            self.sessions[server_name] = session
-            logger.debug(f"Successfully initialized session for server: {server_name}")
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()                   # <-- can hang
 
-            # Load tools from this server
-            server_tools = await self._load_tools(session, server_name)
-            self.server_tools[server_name] = server_tools
-            self.tools.update(server_tools)
-            logger.debug(f"Loaded {len(server_tools)} tools from server: {server_name}")
+            #  success ▸ transfer ownership of the resources
+            return session, stack.pop_all()              # nothing left to close here
 
     async def _load_tools(self, session: ClientSession, server_name: str) -> Set[Callable]:
         """
