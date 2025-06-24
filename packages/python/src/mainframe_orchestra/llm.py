@@ -215,7 +215,29 @@ class OpenAICompatibleProvider:
 
             # Add any additional parameters
             if additional_params:
-                request_params.update(additional_params)
+                # Split additional_params into supported SDK params and extra_body params
+                supported_openai_params = {
+                    'frequency_penalty', 'function_call', 'functions', 'logit_bias', 
+                    'logprobs', 'max_tokens', 'max_completion_tokens', 'n', 'parallel_tool_calls',
+                    'presence_penalty', 'response_format', 'seed', 'stop', 'stream',
+                    'temperature', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'user'
+                }
+                
+                sdk_params = {}
+                extra_body_params = {}
+                
+                for key, value in additional_params.items():
+                    if key in supported_openai_params:
+                        sdk_params[key] = value
+                    else:
+                        extra_body_params[key] = value
+                
+                # Add SDK-supported parameters directly
+                request_params.update(sdk_params)
+                
+                # Add unsupported parameters to extra_body
+                if extra_body_params:
+                    request_params['extra_body'] = extra_body_params
 
             # Log request details
             logger.debug(
