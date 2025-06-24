@@ -758,6 +758,7 @@ class OpenrouterModels:
         require_json_output: bool = False,
         messages: Optional[List[Dict[str, str]]] = None,
         stream: bool = False,
+        **extra_kwargs,
     ) -> Union[Tuple[str, Optional[Exception]], AsyncGenerator[str, None]]:
         """
         Sends a request to OpenRouter models.
@@ -805,10 +806,11 @@ class OpenrouterModels:
             messages=messages,
             stream=stream,
             additional_params=additional_params,
+            **extra_kwargs,
         )
 
     @staticmethod
-    def custom_model(model_name: str):
+    def custom_model(model_name: str, **static_kwargs):
         async def wrapper(
             image_data: Union[List[str], str, None] = None,
             temperature: float = 0.7,
@@ -816,7 +818,9 @@ class OpenrouterModels:
             require_json_output: bool = False,
             messages: Optional[List[Dict[str, str]]] = None,
             stream: bool = False,
+            **call_kwargs,
         ) -> Union[Tuple[str, Optional[Exception]], Iterator[str]]:
+            merged_kwargs = {**static_kwargs, **call_kwargs}
             return await OpenrouterModels.send_openrouter_request(
                 model=model_name,
                 image_data=image_data,
@@ -825,6 +829,7 @@ class OpenrouterModels:
                 require_json_output=require_json_output,
                 messages=messages,
                 stream=stream,
+                **merged_kwargs,
             )
 
         return wrapper
