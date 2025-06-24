@@ -126,6 +126,29 @@ def set_verbosity(value: Union[str, bool, int]):
             logger.setLevel(logging.WARNING)
 
 
+def _split_sdk_params(additional_params: Dict, supported_sdk_params: set) -> Tuple[Dict, Dict]:
+    """
+    Split additional_params into SDK-supported parameters and extra_body parameters.
+    
+    Args:
+        additional_params: Dictionary of additional parameters
+        supported_sdk_params: Set of parameter names supported by the SDK
+        
+    Returns:
+        Tuple of (sdk_params, extra_body_params)
+    """
+    sdk_params = {}
+    extra_body_params = {}
+    
+    for key, value in additional_params.items():
+        if key in supported_sdk_params:
+            sdk_params[key] = value
+        else:
+            extra_body_params[key] = value
+    
+    return sdk_params, extra_body_params
+
+
 class OpenAICompatibleProvider:
     """
     Base class for handling OpenAI-compatible API providers.
@@ -223,14 +246,7 @@ class OpenAICompatibleProvider:
                     'temperature', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'user'
                 }
                 
-                sdk_params = {}
-                extra_body_params = {}
-                
-                for key, value in additional_params.items():
-                    if key in supported_openai_params:
-                        sdk_params[key] = value
-                    else:
-                        extra_body_params[key] = value
+                sdk_params, extra_body_params = _split_sdk_params(additional_params, supported_openai_params)
                 
                 # Add SDK-supported parameters directly
                 request_params.update(sdk_params)
@@ -516,6 +532,7 @@ class AnthropicModels:
         messages: Optional[List[Dict[str, str]]] = None,
         stop_sequences: Optional[List[str]] = None,
         stream: bool = False,
+        additional_params: Optional[Dict] = None,
     ) -> Union[Tuple[str, Optional[Exception]], AsyncGenerator[str, None]]:
         """
         Sends an asynchronous request to an Anthropic model using the Messages API format.
@@ -622,6 +639,38 @@ class AnthropicModels:
                 f"[LLM] Anthropic ({model}) Request: {json.dumps({'system_message': system_message, 'messages': anthropic_messages, 'temperature': temperature, 'max_tokens': max_tokens, 'stop_sequences': stop_sequences}, separators=(',', ':'))}"
             )
 
+            # Prepare request parameters
+            request_params = {
+                "model": model,
+                "messages": anthropic_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": stream,
+            }
+            
+            if system_message:
+                request_params["system"] = system_message
+            if stop_sequences:
+                request_params["stop_sequences"] = stop_sequences
+            
+            # Add any additional parameters
+            if additional_params:
+                # Split additional_params into supported SDK params and extra_body params  
+                supported_anthropic_params = {
+                    'max_tokens', 'messages', 'model', 'metadata', 'service_tier',
+                    'stop_sequences', 'stream', 'system', 'temperature', 'thinking',
+                    'tool_choice', 'tools', 'top_k', 'top_p'
+                }
+                
+                sdk_params, extra_body_params = _split_sdk_params(additional_params, supported_anthropic_params)
+                
+                # Add SDK-supported parameters directly
+                request_params.update(sdk_params)
+                
+                # Add unsupported parameters to extra_body
+                if extra_body_params:
+                    request_params['extra_body'] = extra_body_params
+
             # Handle streaming
             if stream:
                 spinner.stop()  # Stop spinner before streaming
@@ -630,15 +679,7 @@ class AnthropicModels:
                     full_message = ""
                     logger.debug("Stream started")
                     try:
-                        response = await client.messages.create(
-                            model=model,
-                            messages=anthropic_messages,
-                            system=system_message,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            stop_sequences=stop_sequences if stop_sequences else None,
-                            stream=True,
-                        )
+                        response = await client.messages.create(**request_params)
                         async for chunk in response:
                             if chunk.type == "content_block_delta":
                                 if chunk.delta.type == "text_delta":
@@ -687,14 +728,10 @@ class AnthropicModels:
 
             # Non-streaming logic
             spinner.text = f"Waiting for {model} response..."
-            response = await client.messages.create(
-                model=model,
-                messages=anthropic_messages,
-                system=system_message,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop_sequences=stop_sequences if stop_sequences else None,
-            )
+            # Remove stream parameter for non-streaming
+            non_stream_params = request_params.copy()
+            non_stream_params.pop('stream', None)
+            response = await client.messages.create(**non_stream_params)
 
             content = response.content[0].text if response.content else ""
             spinner.succeed("Request completed")
@@ -731,7 +768,7 @@ class AnthropicModels:
                 spinner.stop()
 
     @staticmethod
-    def custom_model(model_name: str):
+    def custom_model(model_name: str, **static_kwargs):
         async def wrapper(
             image_data: Union[List[str], str, None] = None,
             temperature: float = 0.7,
@@ -740,9 +777,11 @@ class AnthropicModels:
             messages: Optional[List[Dict[str, str]]] = None,
             stop_sequences: Optional[List[str]] = None,
             stream: bool = False,  # Add stream parameter
+            **call_kwargs,
         ) -> Union[
             Tuple[str, Optional[Exception]], AsyncGenerator[str, None]
         ]:  # Update return type
+            merged_kwargs = {**static_kwargs, **call_kwargs}
             return await AnthropicModels.send_anthropic_request(
                 model=model_name,
                 image_data=image_data,
@@ -752,6 +791,7 @@ class AnthropicModels:
                 messages=messages,
                 stop_sequences=stop_sequences,
                 stream=stream,  # Pass stream parameter
+                additional_params=merged_kwargs,
             )
 
         return wrapper
