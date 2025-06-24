@@ -790,9 +790,12 @@ class OpenrouterModels:
         api_key = config.validate_api_key("OPENROUTER_API_KEY")
 
         # Handle o1 model message transformations if needed
-        additional_params = None
+        additional_params = {}
         if model.endswith("o1-mini") or model.endswith("o1-preview"):
             messages = OpenaiModels._transform_o1_messages(messages, require_json_output)
+        
+        # Add any extra kwargs to additional_params
+        additional_params.update(extra_kwargs)
 
         return await OpenAICompatibleProvider.send_request(
             model=model,
@@ -805,8 +808,7 @@ class OpenrouterModels:
             require_json_output=require_json_output,
             messages=messages,
             stream=stream,
-            additional_params=additional_params,
-            **extra_kwargs,
+            additional_params=additional_params if additional_params else None,
         )
 
     @staticmethod
