@@ -733,7 +733,35 @@ class AnthropicModels:
             non_stream_params.pop('stream', None)
             response = await client.messages.create(**non_stream_params)
 
-            logger.debug(f"[LLM] API Response: {json.dumps(response.content, indent=2) if response.content else 'No content in response'}")
+            # Log response content parts in a serializable way
+            if response.content:
+                content_parts = []
+                for part in response.content:
+                    if hasattr(part, 'type'):
+                        if part.type == "text":
+                            content_parts.append({
+                                "type": "text",
+                                "text": getattr(part, 'text', '')
+                            })
+                        elif part.type == "tool_use":
+                            content_parts.append({
+                                "type": "tool_use",
+                                "id": getattr(part, 'id', ''),
+                                "name": getattr(part, 'name', ''),
+                                "input": getattr(part, 'input', {})
+                            })
+                        else:
+                            # Handle other content types generically
+                            content_parts.append({
+                                "type": getattr(part, 'type', 'unknown'),
+                                "raw": str(part)
+                            })
+                    else:
+                        # Fallback for parts without type attribute
+                        content_parts.append({"raw": str(part)})
+                logger.debug(f"[LLM] API Response: {json.dumps(content_parts, separators=(',', ':'))}")
+            else:
+                logger.debug("[LLM] API Response: No content in response")
 
             # Concatenate all text content parts for more robust parsing
             content = ""
