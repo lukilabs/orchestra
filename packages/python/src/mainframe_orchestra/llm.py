@@ -769,8 +769,6 @@ class AnthropicModels:
                 for content_part in response.content:
                     if hasattr(content_part, 'type') and content_part.type == "text":
                         content += content_part.text
-                    elif hasattr(content_part, 'text'):  # Fallback for older format
-                        content += content_part.text
             
             spinner.succeed("Request completed")
             # For non-JSON responses, keep original formatting but make single line
