@@ -733,10 +733,20 @@ class AnthropicModels:
             non_stream_params.pop('stream', None)
             response = await client.messages.create(**non_stream_params)
 
-            content = response.content[0].text if response.content else ""
+            logger.debug(f"[LLM] API Response: {json.dumps(response.content, indent=2) if response.content else 'No content in response'}")
+
+            # Concatenate all text content parts for more robust parsing
+            content = ""
+            if response.content:
+                for content_part in response.content:
+                    if hasattr(content_part, 'type') and content_part.type == "text":
+                        content += content_part.text
+                    elif hasattr(content_part, 'text'):  # Fallback for older format
+                        content += content_part.text
+            
             spinner.succeed("Request completed")
             # For non-JSON responses, keep original formatting but make single line
-            logger.debug(f"[LLM] API Response: {' '.join(content.strip().splitlines())}")
+            logger.debug(f"[LLM] API Text Response: {' '.join(content.strip().splitlines())}")
             return content.strip(), None
 
         except (AnthropicConnectionError, AnthropicTimeoutError) as e:
